@@ -1,5 +1,3 @@
-# index.html
-记账
 <!DOCTYPE html>
 <html lang="zh-CN">
 <head>
