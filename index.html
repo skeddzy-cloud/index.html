@@ -19,6 +19,7 @@
       --primary-ink: #ffffff;
       --accent: #1d4ed8;
       --danger: #dc2626;
+      --warn: #d97706;
       --border: #e2e8f0;
     }
     * { box-sizing: border-box; touch-action: manipulation; }
@@ -27,7 +28,7 @@
       font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
       background: var(--bg);
       color: var(--ink);
-      padding-bottom: 84px;
+      padding-bottom: 88px;
     }
     .wrap { max-width: 560px; margin: 0 auto; padding: 14px; }
     .hero {
@@ -56,6 +57,32 @@
       font-size: 13px;
       font-weight: 600;
       cursor: pointer;
+    }
+    .close-banner {
+      background: #fef3c7;
+      border: 1px solid #f59e0b;
+      color: #78350f;
+      border-radius: 14px;
+      padding: 12px 14px;
+      margin-bottom: 14px;
+      display: none;
+      align-items: center;
+      justify-content: space-between;
+      gap: 10px;
+      font-size: 13px;
+    }
+    .close-banner.show { display: flex; }
+    .close-btn {
+      min-height: 36px;
+      padding: 0 12px;
+      border-radius: 10px;
+      border: none;
+      background: #d97706;
+      color: #fff;
+      font-weight: 700;
+      font-size: 13px;
+      cursor: pointer;
+      white-space: nowrap;
     }
     .summary {
       display: grid;
@@ -320,13 +347,18 @@
 </head>
 <body>
   <div class="wrap">
+    <div class="close-banner" id="closeBanner">
+      <div id="closeBannerText">今天是月底结账日（30/31号），可立即结账归档当月汇总。</div>
+      <button type="button" class="close-btn" onclick="settleCurrentCycle(false)">立即结账</button>
+    </div>
+
     <div class="hero">
       <div class="hero-top">
         <div>
-          <div class="brand">智账本 · 个人双币种账本</div>
-          <div class="sub">纯本地存储 · MYR 日常核算 / USD 投资追踪</div>
+          <div class="brand" id="cycleTitle">智账本 · 本期账期</div>
+          <div class="sub">每月30/31号结账 · 下月1号重新开始算 · 纯本地存储</div>
         </div>
-        <button type="button" class="gear-btn" onclick="switchTab('settings')">⚙ 备份/AI</button>
+        <button type="button" class="gear-btn" onclick="switchTab('settings')">⚙ 结账/备份</button>
       </div>
       <div class="summary">
         <div class="sum-box">
@@ -343,10 +375,20 @@
     </div>
 
     <div class="settings-panel" id="settingsPanel">
-      <div style="font-weight:700; font-size:14px; margin-bottom:6px;">可选：Gemini Vision 增强识单据</div>
+      <div style="font-weight:700; font-size:14px; margin-bottom:6px;">月度结账归档（30/31号结账 · 1号重算）</div>
       <div style="font-size:12px; color:var(--muted); margin-bottom:8px;">
-        默认用本地 OCR 自动提取金额、店名/品牌与消费项目；填入 Gemini API Key 后可更准确识别多语言单据。Key 仅存本地。
+        每逢 30/31 号或次月 1 号会自动归档上一期汇总并从 0 重新计算当期收支；你也可以随时手动结账归档。所有明细永久保留在本地。
       </div>
+      <div class="row">
+        <button type="button" class="action-btn" onclick="settleCurrentCycle(false)">手动结账归档当前期</button>
+        <select id="cycleSelect" style="flex:1; margin-bottom:0;" onchange="onCycleChange()">
+          <option value="current">当前未结账期</option>
+          <option value="all">全部历史账期</option>
+        </select>
+      </div>
+      <div id="settlementHistory" style="margin-bottom:10px; font-size:12px; color:var(--muted);"></div>
+
+      <div style="font-weight:700; font-size:14px; margin-bottom:6px;">可选：Gemini Vision 增强识单据</div>
       <input type="password" id="geminiKeyInput" placeholder="粘贴 Gemini API Key（可选）" oninput="saveGeminiKey()" />
       <div class="row" style="margin-bottom:0;">
         <button type="button" class="action-btn" onclick="exportJSON()">导出 JSON</button>
@@ -439,21 +481,156 @@
     </button>
     <button type="button" class="nav-btn" id="nav-settings" onclick="switchTab('settings')">
       <span class="ico">⚙</span>
-      <span>备份/设置</span>
+      <span>结账/备份</span>
     </button>
   </nav>
 
   <script>
     const STORAGE_KEY = 'smart_ledger_records_v2';
+    const SETTLEMENTS_KEY = 'smart_ledger_settlements_v1';
     const GEMINI_KEY_STORAGE = 'smart_ledger_gemini_key_v1';
 
     let currentType = 'expense';
     let currentCurrency = 'MYR';
     let currentFilter = 'all';
+    let selectedCycle = 'current';
     let records = JSON.parse(localStorage.getItem(STORAGE_KEY) || '[]');
+    let settlements = JSON.parse(localStorage.getItem(SETTLEMENTS_KEY) || '[]');
 
-    document.getElementById('dateInput').valueAsDate = new Date();
+    function getCycleIdForDate(dateStr) {
+      const d = dateStr ? new Date(dateStr + 'T12:00:00') : new Date();
+      if (isNaN(d.getTime())) return new Date().toISOString().slice(0, 7);
+      const y = d.getFullYear();
+      const m = String(d.getMonth() + 1).padStart(2, '0');
+      return `${y}-${m}`;
+    }
+
+    function getTodayISO() {
+      const now = new Date();
+      const y = now.getFullYear();
+      const m = String(now.getMonth() + 1).padStart(2, '0');
+      const d = String(now.getDate()).padStart(2, '0');
+      return `${y}-${m}-${d}`;
+    }
+
+    // 兼容旧记录没有 cycleId 的情况
+    records = records.map(r => ({
+      ...r,
+      cycleId: r.cycleId || getCycleIdForDate(r.date)
+    }));
+
+    function checkAutoCycleRollover() {
+      const now = new Date();
+      const day = now.getDate();
+      const thisCycle = getCycleIdForDate(getTodayISO());
+      const settledCycles = new Set(settlements.map(s => s.cycleId));
+
+      // 每月 1 号自动把上一个月未结账期归档，下个月 1 号重新从 0 算
+      if (day === 1) {
+        const prevDate = new Date(now.getFullYear(), now.getMonth() - 1, 15);
+        const prevCycle = `${prevDate.getFullYear()}-${String(prevDate.getMonth() + 1).padStart(2, '0')}`;
+        const hasPrevUnsettled = records.some(r => !r.settled && r.cycleId === prevCycle);
+        if (hasPrevUnsettled && !settledCycles.has(prevCycle)) {
+          settleCycleById(prevCycle, true);
+        }
+      }
+
+      // 每月 30 或 31 号显示结账提醒横幅
+      const banner = document.getElementById('closeBanner');
+      if ((day === 30 || day === 31) && !settledCycles.has(thisCycle)) {
+        document.getElementById('closeBannerText').textContent =
+          `今天是 ${day} 号结账日，可立即结账归档 ${thisCycle} 账期，下月 1 号重新开始算。`;
+        banner.classList.add('show');
+      } else {
+        banner.classList.remove('show');
+      }
+    }
+
+    function settleCycleById(cycleId, silent) {
+      const targetRows = records.filter(r => !r.settled && r.cycleId === cycleId);
+      let myrExpense = 0, myrIncome = 0, usdInvest = 0;
+      targetRows.forEach(r => {
+        if (r.currency === 'MYR') {
+          if (r.type === 'income') myrIncome += Number(r.amount);
+          else myrExpense += Number(r.amount);
+        } else {
+          usdInvest += Number(r.amount);
+        }
+      });
+
+      records = records.map(r => (!r.settled && r.cycleId === cycleId ? { ...r, settled: true } : r));
+      localStorage.setItem(STORAGE_KEY, JSON.stringify(records));
+
+      const existingIdx = settlements.findIndex(s => s.cycleId === cycleId);
+      const entry = {
+        cycleId,
+        settledAt: getTodayISO(),
+        myrNet: Number((myrIncome - myrExpense).toFixed(2)),
+        myrExpense: Number(myrExpense.toFixed(2)),
+        myrIncome: Number(myrIncome.toFixed(2)),
+        usdInvest: Number(usdInvest.toFixed(2)),
+        count: targetRows.length
+      };
+      if (existingIdx >= 0) settlements[existingIdx] = entry;
+      else settlements.unshift(entry);
+      localStorage.setItem(SETTLEMENTS_KEY, JSON.stringify(settlements));
+
+      document.getElementById('closeBanner').classList.remove('show');
+      renderCycleOptions();
+      render();
+      if (!silent) {
+        alert(`已结账归档 ${cycleId}（共 ${targetRows.length} 笔），新记账目将重新累计。`);
+      }
+    }
+
+    function settleCurrentCycle(silent) {
+      const activeCycle = getCycleIdForDate(getTodayISO());
+      settleCycleById(activeCycle, silent);
+    }
+
+    function renderCycleOptions() {
+      const sel = document.getElementById('cycleSelect');
+      const prevVal = sel.value || selectedCycle;
+      const options = [
+        { value: 'current', label: `当前未结账期 (${getCycleIdForDate(getTodayISO())})` },
+        { value: 'all', label: '全部历史账期' }
+      ];
+      settlements.forEach(s => {
+        options.push({ value: `settled:${s.cycleId}`, label: `已结账期 ${s.cycleId}` });
+      });
+      sel.innerHTML = options.map(o => `<option value="${o.value}">${escapeHtml(o.label)}</option>`).join('');
+      if (options.some(o => o.value === prevVal)) sel.value = prevVal;
+      else sel.value = 'current';
+      selectedCycle = sel.value;
+
+      const histEl = document.getElementById('settlementHistory');
+      if (!settlements.length) {
+        histEl.innerHTML = '暂无已结账期记录（每月 30/31 号或下月 1 号会归档）。';
+      } else {
+        histEl.innerHTML = '<strong>已结账期快照：</strong><br>' + settlements.map(s =>
+          `${s.cycleId}（${s.settledAt} 结）：MYR 净额 RM ${Number(s.myrNet).toFixed(2)} · USD 投入 $ ${Number(s.usdInvest).toFixed(2)}`
+        ).join('<br>');
+      }
+    }
+
+    function onCycleChange() {
+      selectedCycle = document.getElementById('cycleSelect').value;
+      render();
+    }
+
+    function getVisibleRecords() {
+      if (selectedCycle === 'all') return records;
+      if (selectedCycle.startsWith('settled:')) {
+        const cid = selectedCycle.replace('settled:', '');
+        return records.filter(r => r.cycleId === cid);
+      }
+      return records.filter(r => !r.settled);
+    }
+
+    document.getElementById('dateInput').value = getTodayISO();
     document.getElementById('geminiKeyInput').value = localStorage.getItem(GEMINI_KEY_STORAGE) || '';
+    checkAutoCycleRollover();
+    renderCycleOptions();
 
     function switchTab(tab) {
       const settingsEl = document.getElementById('settingsPanel');
@@ -590,7 +767,6 @@
         if (uniqueAmounts.length >= 6) break;
       }
 
-      // 抓店名/品牌（通常在靠前几行，排除纯数字、日期、电话、发票号、地址/税号词）
       const skipMerchant = /^(tax\s*invoice|invoice|receipt|resit|welcome|thank\s*you|tel|phone|sst|reg\s*no|roc|order|date|time|table|cashier|subtotal|total|qty|\d+[-/.]\d+)/i;
       let merchant = '';
       for (let i = 0; i < Math.min(lines.length, 8); i++) {
@@ -603,7 +779,6 @@
         break;
       }
 
-      // 抓消费项目（优先找带金额的商品行或非合计/非杂项的文字行）
       let itemDesc = '';
       for (const line of lines) {
         if (line === merchant) continue;
@@ -833,6 +1008,7 @@
         alert('请输入大于 0 的金额');
         return;
       }
+      const dateVal = document.getElementById('dateInput').value || getTodayISO();
       const item = {
         id: Date.now(),
         type: currentType,
@@ -840,12 +1016,18 @@
         amount: Number(amt.toFixed(2)),
         note: document.getElementById('noteInput').value.trim() || document.getElementById('catInput').value,
         category: document.getElementById('catInput').value,
-        date: document.getElementById('dateInput').value || new Date().toISOString().slice(0, 10)
+        date: dateVal,
+        cycleId: getCycleIdForDate(dateVal),
+        settled: false
       };
       records.unshift(item);
       localStorage.setItem(STORAGE_KEY, JSON.stringify(records));
       document.getElementById('amountInput').value = '';
       document.getElementById('noteInput').value = '';
+      if (selectedCycle !== 'current') {
+        selectedCycle = 'current';
+        document.getElementById('cycleSelect').value = 'current';
+      }
       render();
     }
 
@@ -856,17 +1038,18 @@
     }
 
     function exportJSON() {
-      const blob = new Blob([JSON.stringify(records, null, 2)], { type: 'application/json' });
+      const payload = { records, settlements, exportedAt: new Date().toISOString() };
+      const blob = new Blob([JSON.stringify(payload, null, 2)], { type: 'application/json' });
       const url = URL.createObjectURL(blob);
       const a = document.createElement('a');
       a.href = url;
-      a.download = `ledger-backup-${new Date().toISOString().slice(0, 10)}.json`;
+      a.download = `ledger-backup-${getTodayISO()}.json`;
       a.click();
       URL.revokeObjectURL(url);
     }
 
     function exportCSV() {
-      const header = ['id', 'date', 'type', 'currency', 'amount', 'category', 'note'];
+      const header = ['id', 'date', 'cycleId', 'settled', 'type', 'currency', 'amount', 'category', 'note'];
       const rows = records.map(r =>
         header.map(k => `"${String(r[k] ?? '').replace(/"/g, '""')}"`).join(',')
       );
@@ -875,7 +1058,7 @@
       const url = URL.createObjectURL(blob);
       const a = document.createElement('a');
       a.href = url;
-      a.download = `ledger-${new Date().toISOString().slice(0, 10)}.csv`;
+      a.download = `ledger-${getTodayISO()}.csv`;
       a.click();
       URL.revokeObjectURL(url);
     }
@@ -887,9 +1070,19 @@
       reader.onload = () => {
         try {
           const parsed = JSON.parse(reader.result);
-          if (!Array.isArray(parsed)) throw new Error('格式错误');
-          records = parsed;
+          if (Array.isArray(parsed)) {
+            records = parsed.map(r => ({ ...r, cycleId: r.cycleId || getCycleIdForDate(r.date) }));
+          } else if (parsed && Array.isArray(parsed.records)) {
+            records = parsed.records.map(r => ({ ...r, cycleId: r.cycleId || getCycleIdForDate(r.date) }));
+            if (Array.isArray(parsed.settlements)) {
+              settlements = parsed.settlements;
+              localStorage.setItem(SETTLEMENTS_KEY, JSON.stringify(settlements));
+            }
+          } else {
+            throw new Error('格式错误');
+          }
           localStorage.setItem(STORAGE_KEY, JSON.stringify(records));
+          renderCycleOptions();
           render();
           alert(`已导入 ${records.length} 条记录`);
         } catch (err) {
@@ -907,12 +1100,13 @@
 
     function renderStats() {
       const statsEl = document.getElementById('statsList');
-      if (!records.length) {
-        statsEl.innerHTML = '<div class="tx-meta">暂无记录可统计。</div>';
+      const visible = getVisibleRecords();
+      if (!visible.length) {
+        statsEl.innerHTML = '<div class="tx-meta">当前账期暂无记录可统计。</div>';
         return;
       }
       const map = {};
-      records.forEach(r => {
+      visible.forEach(r => {
         const key = `${r.category} (${r.currency})`;
         map[key] = (map[key] || 0) + Number(r.amount);
       });
@@ -924,17 +1118,27 @@
     }
 
     function render() {
+      const visible = getVisibleRecords();
+      const titleEl = document.getElementById('cycleTitle');
+      if (selectedCycle === 'all') {
+        titleEl.textContent = '智账本 · 全部历史账期';
+      } else if (selectedCycle.startsWith('settled:')) {
+        titleEl.textContent = `智账本 · 已结账期 ${selectedCycle.replace('settled:', '')}`;
+      } else {
+        titleEl.textContent = `智账本 · 当前账期 (${getCycleIdForDate(getTodayISO())})`;
+      }
+
       let myrExpense = 0;
       let myrIncome = 0;
       let usdInvest = 0;
       let usdCount = 0;
 
-      records.forEach(r => {
+      visible.forEach(r => {
         if (r.currency === 'MYR') {
-          if (r.type === 'income') myrIncome += r.amount;
-          else myrExpense += r.amount;
+          if (r.type === 'income') myrIncome += Number(r.amount);
+          else myrExpense += Number(r.amount);
         } else {
-          usdInvest += r.amount;
+          usdInvest += Number(r.amount);
           usdCount += 1;
         }
       });
@@ -947,24 +1151,25 @@
       document.getElementById('usdCount').textContent = `共 ${usdCount} 笔投资记录`;
 
       const filtered = currentFilter === 'all'
-        ? records
-        : records.filter(r => r.type === currentFilter);
+        ? visible
+        : visible.filter(r => r.type === currentFilter);
 
       document.getElementById('recordCount').textContent = `${filtered.length} 笔`;
 
       const listEl = document.getElementById('txList');
       if (!filtered.length) {
-        listEl.innerHTML = '<div class="tx-meta">当前筛选下还没有记录，可以拍照识单据或手动记一笔。</div>';
+        listEl.innerHTML = '<div class="tx-meta">当前账期还没有记录，可以拍照识单据或手动记一笔。</div>';
       } else {
         listEl.innerHTML = filtered.map(r => {
           const sign = r.type === 'expense' ? '-' : '+';
           const prefix = r.currency === 'MYR' ? 'RM ' : '$ ';
           const typeLabel = r.type === 'expense' ? '开销' : (r.type === 'income' ? '收入' : '投资');
+          const tag = r.settled ? ' · 已结账' : '';
           return `
             <div class="tx-item">
               <div>
                 <div class="tx-title">${escapeHtml(r.note)}</div>
-                <div class="tx-meta">${escapeHtml(r.date)} · ${escapeHtml(r.category)} · ${typeLabel} (${r.currency})</div>
+                <div class="tx-meta">${escapeHtml(r.date)} · ${escapeHtml(r.category)} · ${typeLabel} (${r.currency})${tag}</div>
               </div>
               <div style="display:flex; align-items:center; gap:8px;">
                 <strong>${sign}${prefix}${Number(r.amount).toFixed(2)}</strong>
